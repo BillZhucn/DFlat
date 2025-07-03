@@ -6,6 +6,51 @@ from .load_utils import load_optical_model
 from .latent import latent_to_param
 
 
+def find_closest_r_indices_batched(
+    library, library_lambdas, target_phase, at_lambda, batch_size=10000
+):
+    """
+    Efficiently find the index r for each pair in target_phase and at_lambda such that
+    library[r, closest_lambda] is closest to exp(1j * target_phase), with internal batching.
+
+    Parameters:
+    - library: 2D NumPy array of shape (n_r, n_lam) with complex numbers.
+    - library_lambdas: 1D NumPy array of shape (n_lam,) in meters.
+    - target_phase: 1D NumPy array of shape (N,) with phase values (in radians).
+    - at_lambda: 1D NumPy array of shape (N,) with wavelengths (in meters).
+    - batch_size: int, number of pixels per batch to process.
+
+    Returns:
+    - r_indices: 1D NumPy array of shape (N,) with radius indices.
+    """
+    library = np.asarray(library)
+    library_lambdas = (np.asarray(library_lambdas) * 1e9).astype(int)
+    target_phase = np.asarray(target_phase)
+    at_lambda = (np.asarray(at_lambda) * 1e9).astype(int)
+
+    # Build fast LUT for wavelength index lookup
+    lambda_to_index = np.full(library_lambdas.max() + 1, -1, dtype=np.int32)
+    for lam in np.unique(at_lambda):
+        lambda_to_index[lam] = np.abs(library_lambdas - lam).argmin()
+
+    # Prepare output
+    r_indices_all = np.empty_like(target_phase, dtype=np.int32)
+
+    for start in range(0, len(target_phase), batch_size):
+        end = start + batch_size
+        batch_phase = target_phase[start:end]
+        batch_lambda = at_lambda[start:end]
+
+        desired_complex = np.exp(1j * batch_phase)
+        nearest_indices = lambda_to_index[batch_lambda]  # vectorized lookup
+
+        selected_columns = library[:, nearest_indices]  # (n_r, B)
+        differences = np.abs(selected_columns - desired_complex[np.newaxis, :]) ** 2
+        r_indices_all[start:end] = differences.argmin(axis=0)
+
+    return r_indices_all
+
+
 def reverse_lookup_optimize(
     amp,
     phase,
