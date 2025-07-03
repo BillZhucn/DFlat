@@ -192,63 +192,80 @@ def assemble_standard_shapes(
     # Upsample the params to match the target blocks
     params_, mask = upsample_block(params, mask, cell_size, block_size)
     mask = mask.astype(bool)
-    pshape = params_.shape
+    print(params_.shape)
+    H, W, D = params_.shape
 
     # Write to GDS
     unique_id = str(uuid.uuid4())[:8]
     lib = gdspy.GdsLibrary(unit=gds_unit, precision=gds_precision)
-    cell = lib.new_cell(f"MAIN_{unique_id}")
-    print("Writing metasurface shapes to GDS File")
+    main_cell = lib.new_cell(f"MAIN_{unique_id}")
+    cell_cache = {}
+
+    print("Writing metasurface shapes to GDS File with cell reuse...")
     start = time.time()
+    dy_unit = cell_size[0] / gds_unit
+    dx_unit = cell_size[1] / gds_unit
 
-    for yi, xi in np.ndindex(pshape[:2]):
-        if mask[yi, xi]:
-            xoffset = cell_size[1] * xi / gds_unit
-            yoffset = cell_size[0] * yi / gds_unit
-            shape_params = params_[yi, xi] / gds_unit
-            shape_params = shape_params.flatten()
+    for yi in range(H):
+        for xi in range(W):
+            if not mask[yi, xi]:
+                continue
 
-            ## In new version of GDSPY, we can no longer specify rectangle widths (?)
-            ## Now it corresponds to edge coordintes which is unfortunate
-            if cell_fun == gdspy.Round:
-                if len(shape_params) == 1:
-                    shape_params = [shape_params[0], shape_params[0]]
-                shape = cell_fun(
-                    (xoffset, yoffset), shape_params, number_of_points=number_of_points
+            # Quantize shape parameters (1 nm)
+            shape_params = tuple(int(round(val * 1e9)) for val in params_[yi, xi])
+
+            if shape_params not in cell_cache:
+                shape_cell = lib.new_cell(
+                    f"SHAPE_{'_'.join(map(str, shape_params))}_{uuid.uuid4().hex[:4]}"
                 )
-            elif cell_fun == gdspy.Rectangle:
-                shape_params += [xoffset, yoffset]
-                shape = cell_fun((xoffset, yoffset), shape_params)
-            else:
-                raise ValueError
-            cell.add(shape)
+                shape_params_unit = [val * 1e-9 / gds_unit for val in shape_params]
 
-    # # Add lens markers
-    # hx = cell_size[1] * pshape[1] / gds_unit
-    # hy = cell_size[0] * pshape[0] / gds_unit
-    # ms = marker_size / gds_unit
-    # cell_annot = lib.new_cell(f"TEXT_{unique_id}")
-    # add_marker_tag(cell_annot, ms, hx, hy)
+                if cell_fun == gdspy.Round:
+                    if len(shape_params_unit) == 1:
+                        radius = shape_params_unit[0]
+                        shape = cell_fun(
+                            (0, 0), radius, number_of_points=number_of_points
+                        )
+                    elif len(shape_params_unit) == 2:
+                        rx, ry = shape_params_unit
+                        shape = cell_fun(
+                            (0, 0), (rx, ry), number_of_points=number_of_points
+                        )
+                    else:
+                        raise ValueError(
+                            "Unsupported shape parameter length for Round."
+                        )
+                elif cell_fun == gdspy.Rectangle:
+                    w, h = shape_params_unit
+                    shape = cell_fun((-w / 2, -h / 2), (w / 2, h / 2))
+                else:
+                    raise ValueError("Unsupported cell function.")
 
-    # # Create top-level cell and add references
+                shape_cell.add(shape)
+                cell_cache[shape_params] = shape_cell
+
+            x = xi * dx_unit
+            y = yi * dy_unit
+            main_cell.add(gdspy.CellReference(cell_cache[shape_params], (x, y)))
+
+    # Wrap with top-level cell
     top_cell = lib.new_cell(f"TOP_CELL_{unique_id}")
-    top_cell.add(gdspy.CellReference(cell))
-    # top_cell.add(gdspy.CellReference(cell_annot))
+    top_cell.add(gdspy.CellReference(main_cell))
 
-    # Write GDS file
     lib.write_gds(savepath)
-    end = time.time()
-    print(
-        f"Completed writing and saving metasurface GDS File. Time: {end - start:.2f} seconds"
-    )
+    print(f"GDS file saved to {savepath}")
+    print(f"Total placed shapes: {np.count_nonzero(mask)}")
+    print(f"Unique shapes: {len(cell_cache)}")
+    print(f"Elapsed time: {time.time() - start:.2f} seconds")
 
     return
 
 
 if __name__ == "__main__":
-    assemble_fin_gds(
-        np.random.rand(10, 10, 2) * 250e-9,
-        np.random.choice([True, False], size=(10, 10)),
+    assemble_cylinder_gds(
+        np.random.rand(10, 10, 1) * 250e-9,
+        np.ones((10, 10)),
+        # np.random.choice([True, False], size=(10, 10)),
         [500e-9, 500e-9],
         [1e-6, 1e-6],
         "/home/deanhazineh/Research/DFlat/dflat/GDSII/out.gds",

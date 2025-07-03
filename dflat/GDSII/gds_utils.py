@@ -9,20 +9,22 @@ def upsample_block(params, mask, cell_size, block_size):
     Hnew = np.rint(H * scale_factor[0]).astype(int)
     Wnew = np.rint(W * scale_factor[1]).astype(int)
 
-    params = cv2.resize(
-        params,
-        (Wnew, Hnew),
-        interpolation=cv2.INTER_LINEAR,
-    )
-    params = np.expand_dims(params, -1)
+    if C == 1:
+        # Resize each channel separately then stack
+        resized = cv2.resize(
+            params[:, :, 0], (Wnew, Hnew), interpolation=cv2.INTER_LINEAR
+        )
+        params = resized[:, :, np.newaxis]  # Restore channel dim
+    else:
+        # Multi-channel image: OpenCV handles it fine
+        params = cv2.resize(params, (Wnew, Hnew), interpolation=cv2.INTER_LINEAR)
 
     mask = cv2.resize(
         mask.astype(np.float16),
         (Wnew, Hnew),
-        interpolation=cv2.INTER_NEAREST,  # Use NEAREST for mask to preserve binary nature
+        interpolation=cv2.INTER_NEAREST,
     )
     mask = mask.astype(bool)
-
     return params, mask
 
 
