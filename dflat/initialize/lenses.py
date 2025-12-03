@@ -83,6 +83,72 @@ def focusing_lens(
     return ampl, phase, aperture
 
 
+def Gaussian_lens(
+    in_size,
+    in_dx_m,
+    wavelength_set_m,
+    depth_set_m,
+    waist_set_m,
+    aperture_radius_m=None,
+    radial_symmetry=False,
+):
+    """Generate amplitude and phase for a lens that converts a point source into a Gaussian beam.
+
+    The lens cancels the spherical phase from a point source located ``depth_set_m`` in
+    front of the lens and applies a Gaussian amplitude envelope with the requested
+    beam waist (1/e^2 intensity radius) at the lens plane. A separate profile is
+    produced for each wavelength/depth/waist tuple.
+    """
+
+    wavelength_set_m = np.array(wavelength_set_m)
+    depth_set_m = np.array(depth_set_m)
+    waist_set_m = np.array(waist_set_m)
+
+    assert (
+        len(depth_set_m) == len(wavelength_set_m) == len(waist_set_m)
+    ), "wavelength_set_m, depth_set_m, and waist_set_m must all have the same number of elements in the list."
+    assert len(in_size) == len(in_dx_m) == 2
+    assert isinstance(aperture_radius_m, float) or aperture_radius_m is None
+    assert isinstance(radial_symmetry, bool)
+    if radial_symmetry:
+        assert in_size[-1] == in_size[-2]
+        assert in_dx_m[-1] == in_dx_m[-2]
+        assert in_size[-1] % 2 != 0
+        assert in_size[-2] % 2 != 0
+
+    # (Batch, H, W)
+    x, y = np.meshgrid(np.arange(in_size[-1]), np.arange(in_size[-2]), indexing="xy")
+    x = x - (x.shape[-1] - 1) / 2
+    y = y - (y.shape[-2] - 1) / 2
+    x = x[None] * in_dx_m[-1]
+    y = y[None] * in_dx_m[-2]
+    r2 = x**2 + y**2
+
+    wavelength_set = wavelength_set_m[:, None, None]
+    depth_set = depth_set_m[:, None, None]
+    waist_set = waist_set_m[:, None, None]
+
+    ampl = np.exp(-r2 / (waist_set**2))
+    ampl = np.clip(ampl, 1e-9, None)
+
+    phase = -2 * np.pi / wavelength_set * np.sqrt(depth_set**2 + r2)
+    phase = np.angle(np.exp(1j * phase))
+
+    aperture = (
+        ((np.sqrt(r2) <= aperture_radius_m)).astype(np.float32) + 1e-6
+        if aperture_radius_m is not None
+        else np.ones_like(phase)
+    )
+
+    if radial_symmetry:
+        cidx = in_size[-1] // 2
+        ampl = ampl[:, cidx : cidx + 1, cidx:]
+        phase = phase[:, cidx : cidx + 1, cidx:]
+        aperture = aperture[:, cidx : cidx + 1, cidx:]
+
+    return ampl, phase, aperture
+
+
 ## This old code was confusing and produced unnecssary batch dimensions that didn't match the ultimate use case
 ## So it is replaced with the above code
 # def focusing_lens_all(
