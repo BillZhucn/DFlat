@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 from dflat.initialize import (
+    Gaussian_lens,
     focusing_lens,
     multiplexing_mask_orthrand,
     multiplexing_mask_sieve,
@@ -74,6 +75,33 @@ def test_focusing_lens_valid(updates, valid_input_dict):
 
         num_l = len(valid_input_dict["wavelength_set_m"])
         assert ampl.shape[0] == num_l
+
+
+def test_gaussian_lens_uses_depth_and_wavelength():
+    in_size = [31, 31]
+    in_dx_m = [2e-6, 2e-6]
+    waist_set_m = [10e-6, 10e-6]
+
+    ampl_depth, phase_depth, _ = Gaussian_lens(
+        in_size=in_size,
+        in_dx_m=in_dx_m,
+        wavelength_set_m=[500e-9, 500e-9],
+        depth_set_m=[10e-3, 20e-3],
+        waist_set_m=waist_set_m,
+    )
+    # Same wavelength/waist should yield identical amplitude but different phase when depths change.
+    assert np.allclose(ampl_depth[0], ampl_depth[1])
+    assert not np.allclose(phase_depth[0], phase_depth[1])
+
+    ampl_wlen, phase_wlen, _ = Gaussian_lens(
+        in_size=in_size,
+        in_dx_m=in_dx_m,
+        wavelength_set_m=[500e-9, 600e-9],
+        depth_set_m=[10e-3, 10e-3],
+        waist_set_m=waist_set_m,
+    )
+    assert np.allclose(ampl_wlen[0], ampl_wlen[1])
+    assert not np.allclose(phase_wlen[0], phase_wlen[1])
 
 
 @pytest.mark.parametrize(
