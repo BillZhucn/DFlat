@@ -2,6 +2,7 @@ import torch
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
+import re
 from .load_utils import load_optical_model
 from .latent import latent_to_param
 
@@ -168,3 +169,241 @@ def reverse_lookup_optimize(
         latent_to_param(z, pmin=pbounds[0], pmax=pbounds[1]).detach().cpu().numpy()
     )
     return op_param, model.denormalize(op_param), err_list
+
+
+def _infer_pitch_height_from_name(model_name):
+    """Attempt to infer unit-cell pitch and height (in meters) from a model name like ``Nanocylinders_TiO2_U300H600``."""
+    pitch_m = None
+    height_m = None
+    pitch_match = re.search(r"_U(\d+)", model_name)
+    height_match = re.search(r"H(\d+)", model_name)
+    if pitch_match:
+        pitch_m = float(pitch_match.group(1)) * 1e-9
+    if height_match:
+        height_m = float(height_match.group(1)) * 1e-9
+    return pitch_m, height_m
+
+
+def _infer_material_from_name(model_name):
+    """Infer a simple material label (e.g., TiO2, Si3N4) from the model name."""
+    match = re.search(r"(TiO2|Si3N4|SiO2|Si)", model_name)
+    return match.group(1) if match else None
+
+
+def export_geometry_to_comsol(
+    params_m,
+    model_name,
+    mph_client=None,
+    mph_model=None,
+    pitch_m=None,
+    height_m=None,
+    component="comp1",
+    geometry="geom1",
+    model_label="dflat_metasurface",
+    z_offset=0.0,
+    material_tag=None,
+    material_label=None,
+    show_progress=True,
+):
+    """Build a COMSOL 3D geometry from reverse-optimized parameters using the ``mph`` package.
+
+    This helper assumes the reverse optimizer output has already been denormalized to meters
+    (e.g., the second element returned by :func:`reverse_lookup_optimize`). For single-parameter
+    cells a cylinder is created (radius = param); for two-parameter cells a block is created
+    (size x/y = params). The cells are placed on a square grid with pitch inferred from the
+    model name (``_U###``) unless ``pitch_m`` is provided directly.
+
+    Args:
+        params_m (array): Metasurface parameters in meters with shape [H, W, D] or [B, H, W, D].
+        model_name (str): Name of the optical model used for inference; used to infer pitch/height.
+        mph_client (mph.Client, optional): Existing mph client. If omitted a new one is started.
+        mph_model (mph.Model, optional): Existing mph model to populate. If omitted a new model is created.
+        pitch_m (float, optional): Unit-cell pitch (meters). Overrides inference from ``model_name``.
+        height_m (float, optional): Feature height (meters). Overrides inference from ``model_name``.
+        component (str, optional): COMSOL component tag to use/create.
+        geometry (str, optional): COMSOL geometry tag to use/create.
+        model_label (str, optional): Label for a newly created COMSOL model.
+        z_offset (float, optional): Starting z-position for the extruded features (meters).
+        material_tag (str, optional): Material tag to create/select; defaults to "mat1" if needed.
+        material_label (str, optional): Material label to set; defaults to an inferred material from the model name.
+
+    Args:
+        show_progress (bool, optional): If True, display a progress bar while
+            populating the unit cells.
+
+    Returns:
+        mph.Model: The COMSOL model containing the populated geometry.
+    """
+    try:
+        import mph
+    except ImportError as exc:
+        raise ImportError(
+            "The `mph` package is required to export geometry to COMSOL. "
+            "Install it and ensure a COMSOL server is reachable."
+        ) from exc
+
+    arr = np.asarray(params_m)
+    if arr.ndim == 4:
+        arr = arr[0]
+    if arr.ndim != 3:
+        raise ValueError("Expected params_m with shape [H, W, D] or [B, H, W, D].")
+
+    h_cells, w_cells, d_params = arr.shape
+    inferred_pitch, inferred_height = _infer_pitch_height_from_name(model_name)
+    inferred_material = _infer_material_from_name(model_name)
+    pitch_m = pitch_m or inferred_pitch
+    height_m = height_m or inferred_height
+    if pitch_m is None:
+        raise ValueError("pitch_m could not be inferred from model_name; please provide it.")
+    if height_m is None:
+        raise ValueError("height_m could not be inferred from model_name; please provide it.")
+
+    if mph_model is None:
+        mph_client = mph_client or mph.start()
+        mph_model = mph_client.create(model_label)
+    comp_root = mph_model.java.component()
+    try:
+        comp_root.create(component, True)
+    except Exception:
+        pass
+    comp = mph_model.java.component(component)
+    geom_root = comp.geom()
+    try:
+        geom_root.create(geometry, 3)
+    except Exception:
+        pass
+    geom = comp.geom(geometry)
+
+    # Clear any previous metasurface features under this geometry tag.
+    try:
+        for tag in list(geom.feature().tags()):
+            geom.feature(tag).remove()
+    except Exception:
+        pass
+
+    total_cells = h_cells * w_cells
+    pbar = None
+    if show_progress:
+        try:
+            from tqdm import tqdm
+        except Exception:
+            tqdm = None
+        if tqdm:
+            pbar = tqdm(total=total_cells, desc="Exporting unit cells")
+
+    for iy in range(h_cells):
+        for ix in range(w_cells):
+            feature_params = arr[iy, ix]
+            cx = (ix - w_cells / 2 + 0.5) * pitch_m
+            cy = (iy - h_cells / 2 + 0.5) * pitch_m
+            tag = f"cell_{iy}_{ix}"
+
+            if d_params == 1:
+                radius = float(feature_params[0])
+                geom.create(tag, "Cylinder")
+                geom.feature(tag).set("r", radius)
+                geom.feature(tag).set("h", height_m)
+                geom.feature(tag).set("pos", [cx, cy, z_offset])
+            elif d_params == 2:
+                sx, sy = [float(v) for v in feature_params]
+                geom.create(tag, "Block")
+                geom.feature(tag).set("size", [sx, sy, height_m])
+                geom.feature(tag).set("pos", [cx - sx / 2, cy - sy / 2, z_offset])
+            else:
+                raise ValueError(
+                    f"Unsupported number of parameters per cell ({d_params}). "
+                    "Only 1 (cylinder radius) or 2 (block x/y) are supported."
+                )
+            if pbar:
+                pbar.update(1)
+
+    if pbar:
+        pbar.close()
+
+    geom.run()
+    material_name = material_label or inferred_material
+    if material_tag or material_name:
+        tag = material_tag or "mat1"
+        try:
+            comp.material().create(tag)
+        except Exception:
+            pass
+        mat = comp.material(tag)
+        if material_name:
+            mat.label(material_name)
+        mat.selection().all()
+    return mph_model
+
+
+def reverse_lookup_optimize_rcwa(
+    target_amp,
+    target_phase,
+    wavelength_set_m,
+    rcwa_kwargs,
+    lr=1e-2,
+    err_thresh=1e-3,
+    max_iter=500,
+    binarize=True,
+):
+    """By Codex without proofreading & testing, do not trust blindly.
+    
+    Topology optimization wrapper that uses the RCWA solver instead of a neural surrogate.
+
+    This assumes the RCWA solver is parameterized by a binary (or grayscale) pattern of
+    shape [Layers, Nx, Ny] and that the target field is specified at the zero-order port.
+
+    Args:
+        target_amp (array): Desired amplitude of shape [Pol=2, Lam, Px, Py].
+        target_phase (array): Desired phase (rad) of shape [Pol=2, Lam, Px, Py].
+        wavelength_set_m (array): Wavelengths used in the RCWA simulation.
+        rcwa_kwargs (dict): Keyword args forwarded to RCWA_Solver (e.g., thetas, phis,
+            pte, ptm, pixelsX, pixelsY, PQ, lux, luy, layer_heights, layer_embed_mats,
+            material_dielectric, Nx, Ny, er1, er2, ...).
+        lr (float): Learning rate for Adam.
+        err_thresh (float): Early stopping threshold on MAE.
+        max_iter (int): Maximum optimization steps.
+        binarize (bool): If True, optimizes unconstrained logits and uses sigmoid to keep
+            patterns in [0,1]. Set False to allow unconstrained grayscale values.
+
+    Returns:
+        tuple: (optimized_pattern, loss_history) where optimized_pattern has shape
+            [Layers, Nx, Ny] on CPU.
+    """
+    from dflat.rcwa import RCWA_Solver
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    solver = RCWA_Solver(wavelength_set_m=wavelength_set_m, **rcwa_kwargs).to(device)
+
+    # Target field
+    target_amp = torch.tensor(target_amp, dtype=torch.float32, device=device)
+    target_phase = torch.tensor(target_phase, dtype=torch.float32, device=device)
+    zero = torch.tensor(0.0, dtype=target_amp.dtype, device=device)
+    target_field = torch.complex(target_amp, zero) * torch.exp(
+        torch.complex(zero, target_phase)
+    )
+
+    # Design variables
+    logits = torch.zeros(
+        (solver.Nlayers, solver.Nx, solver.Ny),
+        dtype=torch.float32,
+        device=device,
+        requires_grad=True,
+    )
+
+    optimizer = optim.Adam([logits], lr=lr)
+    err_list = []
+    for _ in range(max_iter):
+        optimizer.zero_grad()
+        pattern = torch.sigmoid(logits) if binarize else logits
+        pred_field = solver(pattern, ref_field=True)
+        loss = torch.mean(torch.abs(pred_field - target_field))
+        loss.backward()
+        optimizer.step()
+
+        err = loss.item()
+        err_list.append(err)
+        if err < err_thresh:
+            break
+
+    final_pattern = torch.sigmoid(logits).detach().cpu().numpy() if binarize else logits.detach().cpu().numpy()
+    return final_pattern, err_list
