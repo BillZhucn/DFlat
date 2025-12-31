@@ -235,9 +235,6 @@ def export_geometry_to_comsol(
             populating the unit cells.
         debug (bool, optional): If True, print per-chunk timing and per-cell creation tags.
         log_every (int, optional): Print a timing heartbeat every N cells when debug is True.
-
-    Returns:
-        mph.Model: The COMSOL model containing the populated geometry.
     """
     import time
 
