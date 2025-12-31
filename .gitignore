@@ -14,3 +14,5 @@ dflat/**.mat
 dflat/**.png
 dflat/**.pdf
 dflat/**.ckpt
+**wheel
+.python-version

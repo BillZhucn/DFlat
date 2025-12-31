@@ -258,6 +258,250 @@ def assemble_standard_shapes(
     print(f"Unique shapes: {len(cell_cache)}")
     print(f"Elapsed time: {time.time() - start:.2f} seconds")
 
+
+def _shape_to_polygons(shape):
+    if hasattr(shape, "polygons"):
+        return shape.polygons
+    if hasattr(shape, "points"):
+        return [shape.points]
+    raise ValueError("Unsupported GDSPY shape type for DXF export.")
+
+
+def gds_to_dxf(
+    gds_path,
+    dxf_path,
+    cell_name=None,
+    flatten=True,
+):
+    """Convert a GDS file to a DXF file for COMSOL import.
+
+    Args:
+        gds_path (str): Input GDS file path.
+        dxf_path (str): Output DXF file path.
+        cell_name (str, optional): Specific cell name to export. Defaults to top-level cell.
+        flatten (bool, optional): Flatten references before export. Defaults to True.
+    """
+    try:
+        import ezdxf
+    except ImportError as exc:
+        raise ImportError(
+            "The `ezdxf` package is required to export DXF. Install it via pip."
+        ) from exc
+
+    lib = gdspy.GdsLibrary()
+    lib.read_gds(gds_path)
+
+    if cell_name is None:
+        top_cells = lib.top_level()
+        if not top_cells:
+            raise ValueError("No top-level cells found in GDS.")
+        cell = top_cells[0]
+    else:
+        if cell_name not in lib.cells:
+            raise ValueError(f"Cell '{cell_name}' not found in GDS.")
+        cell = lib.cells[cell_name]
+
+    if flatten:
+        cell = cell.copy(f"{cell.name}_FLATTENED")
+        cell.flatten()
+
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    polygons_by_spec = cell.get_polygons(by_spec=True)
+    for (layer, _datatype), polygons in polygons_by_spec.items():
+        layer_name = f"L{layer}"
+        if layer_name not in doc.layers:
+            doc.layers.new(layer_name)
+        for pts in polygons:
+            msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": layer_name})
+
+    doc.saveas(dxf_path)
+
+
+def assemble_standard_shapes_dxf(
+    cell_fun,
+    params,
+    mask,
+    cell_size,
+    block_size,
+    savepath,
+    dxf_unit=1e-6,
+    marker_size=250e-6,
+    number_of_points=9,
+    layer="L0",
+):
+    """Assemble standard shapes and save directly to DXF (for COMSOL import)."""
+    try:
+        import ezdxf
+    except ImportError as exc:
+        raise ImportError(
+            "The `ezdxf` package is required to export DXF. Install it via pip."
+        ) from exc
+
+    if len(cell_size) != 2 or len(block_size) != 2:
+        raise ValueError("cell_size and block_size must be lists of length 2.")
+    if not np.all(np.greater_equal(block_size, cell_size)):
+        raise ValueError("block_size must be greater than or equal to cell_size.")
+    if len(params.shape) != 3 or len(mask.shape) != 2:
+        raise ValueError("params must be 3D and mask must be 2D.")
+    if mask.shape != params.shape[:2]:
+        raise ValueError("mask shape must match the first two dimensions of params.")
+
+    params_, mask = upsample_block(params, mask, cell_size, block_size)
+    mask = mask.astype(bool)
+    H, W, _ = params_.shape
+
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    if layer not in doc.layers:
+        doc.layers.new(layer)
+
+    dy_unit = cell_size[0] / dxf_unit
+    dx_unit = cell_size[1] / dxf_unit
+
+    shape_cache = {}
+    print("Writing metasurface shapes to DXF File...")
+    start = time.time()
+
+    for yi in range(H):
+        for xi in range(W):
+            if not mask[yi, xi]:
+                continue
+
+            shape_params = tuple(int(round(val * 1e9)) for val in params_[yi, xi])
+            if shape_params not in shape_cache:
+                shape_params_unit = [val * 1e-9 / dxf_unit for val in shape_params]
+                if cell_fun == gdspy.Round:
+                    if len(shape_params_unit) == 1:
+                        radius = shape_params_unit[0]
+                        shape = cell_fun(
+                            (0, 0), radius, number_of_points=number_of_points
+                        )
+                    elif len(shape_params_unit) == 2:
+                        rx, ry = shape_params_unit
+                        shape = cell_fun(
+                            (0, 0), (rx, ry), number_of_points=number_of_points
+                        )
+                    else:
+                        raise ValueError(
+                            "Unsupported shape parameter length for Round."
+                        )
+                elif cell_fun == gdspy.Rectangle:
+                    w, h = shape_params_unit
+                    shape = cell_fun((-w / 2, -h / 2), (w / 2, h / 2))
+                else:
+                    raise ValueError("Unsupported cell function.")
+
+                shape_cache[shape_params] = _shape_to_polygons(shape)
+
+            x = xi * dx_unit
+            y = yi * dy_unit
+            for pts in shape_cache[shape_params]:
+                pts_xy = pts + np.array([x, y])
+                msp.add_lwpolyline(
+                    pts_xy,
+                    close=True,
+                    dxfattribs={"layer": layer},
+                )
+
+    doc.saveas(savepath)
+    print(f"DXF file saved to {savepath}")
+    print(f"Total placed shapes: {np.count_nonzero(mask)}")
+    print(f"Unique shapes: {len(shape_cache)}")
+    print(f"Elapsed time: {time.time() - start:.2f} seconds")
+
+
+def assemble_cylinder_dxf(
+    params,
+    mask,
+    cell_size,
+    block_size,
+    savepath,
+    dxf_unit=1e-6,
+    marker_size=250e-6,
+    number_of_points=9,
+    layer="L0",
+):
+    """Generate a DXF file for nanocylinder metasurfaces."""
+    if params.shape[-1] != 1:
+        raise ValueError("Shape dimension D encoding radius should be equal to 1.")
+
+    assemble_standard_shapes_dxf(
+        gdspy.Round,
+        params,
+        mask,
+        cell_size,
+        block_size,
+        savepath,
+        dxf_unit,
+        marker_size,
+        number_of_points,
+        layer,
+    )
+    return
+
+
+def assemble_ellipse_dxf(
+    params,
+    mask,
+    cell_size,
+    block_size,
+    savepath,
+    dxf_unit=1e-6,
+    marker_size=250e-6,
+    number_of_points=9,
+    layer="L0",
+):
+    """Generate a DXF file for nano-ellipse metasurfaces."""
+    if params.shape[-1] != 2:
+        raise ValueError("Shape dimension D encoding radii (x,y) should be equal to 2.")
+
+    assemble_standard_shapes_dxf(
+        gdspy.Round,
+        params,
+        mask,
+        cell_size,
+        block_size,
+        savepath,
+        dxf_unit,
+        marker_size,
+        number_of_points,
+        layer,
+    )
+    return
+
+
+def assemble_fin_dxf(
+    params,
+    mask,
+    cell_size,
+    block_size,
+    savepath,
+    dxf_unit=1e-6,
+    marker_size=250e-6,
+    number_of_points=9,
+    layer="L0",
+):
+    """Generate a DXF file for nanofin metasurfaces."""
+    if params.shape[-1] != 2:
+        raise ValueError(
+            "Shape dimension D encoding width and length should be equal to 2."
+        )
+
+    assemble_standard_shapes_dxf(
+        gdspy.Rectangle,
+        params,
+        mask,
+        cell_size,
+        block_size,
+        savepath,
+        dxf_unit,
+        marker_size,
+        number_of_points,
+        layer,
+    )
+    return
+
     return
 
 

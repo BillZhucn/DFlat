@@ -204,6 +204,9 @@ def export_geometry_to_comsol(
     material_tag=None,
     material_label=None,
     show_progress=True,
+    debug=False,
+    log_every=10000,
+    save_path=None,
 ):
     """Build a COMSOL 3D geometry from reverse-optimized parameters using the ``mph`` package.
 
@@ -227,13 +230,17 @@ def export_geometry_to_comsol(
         material_tag (str, optional): Material tag to create/select; defaults to "mat1" if needed.
         material_label (str, optional): Material label to set; defaults to an inferred material from the model name.
 
-    Args:
+    Debug Args:
         show_progress (bool, optional): If True, display a progress bar while
             populating the unit cells.
+        debug (bool, optional): If True, print per-chunk timing and per-cell creation tags.
+        log_every (int, optional): Print a timing heartbeat every N cells when debug is True.
 
     Returns:
         mph.Model: The COMSOL model containing the populated geometry.
     """
+    import time
+
     try:
         import mph
     except ImportError as exc:
@@ -257,6 +264,8 @@ def export_geometry_to_comsol(
         raise ValueError("pitch_m could not be inferred from model_name; please provide it.")
     if height_m is None:
         raise ValueError("height_m could not be inferred from model_name; please provide it.")
+    if save_path is None:
+        raise ValueError("save_path must be provided to save the COMSOL model.")
 
     if mph_model is None:
         mph_client = mph_client or mph.start()
@@ -291,8 +300,14 @@ def export_geometry_to_comsol(
         if tqdm:
             pbar = tqdm(total=total_cells, desc="Exporting unit cells")
 
+    start_time = time.perf_counter()
     for iy in range(h_cells):
         for ix in range(w_cells):
+            if debug and (iy * w_cells + ix) % log_every == 0:
+                print(
+                    f"[export_geometry_to_comsol] at cell {iy}/{h_cells}, {ix}/{w_cells} "
+                    f"elapsed={time.perf_counter() - start_time:.1f}s"
+                )
             feature_params = arr[iy, ix]
             cx = (ix - w_cells / 2 + 0.5) * pitch_m
             cy = (iy - h_cells / 2 + 0.5) * pitch_m
@@ -300,12 +315,16 @@ def export_geometry_to_comsol(
 
             if d_params == 1:
                 radius = float(feature_params[0])
+                if debug:
+                    print(f"[export_geometry_to_comsol] create Cylinder {tag}")
                 geom.create(tag, "Cylinder")
                 geom.feature(tag).set("r", radius)
                 geom.feature(tag).set("h", height_m)
                 geom.feature(tag).set("pos", [cx, cy, z_offset])
             elif d_params == 2:
                 sx, sy = [float(v) for v in feature_params]
+                if debug:
+                    print(f"[export_geometry_to_comsol] create Block {tag}")
                 geom.create(tag, "Block")
                 geom.feature(tag).set("size", [sx, sy, height_m])
                 geom.feature(tag).set("pos", [cx - sx / 2, cy - sy / 2, z_offset])
@@ -320,19 +339,18 @@ def export_geometry_to_comsol(
     if pbar:
         pbar.close()
 
-    geom.run()
-    material_name = material_label or inferred_material
-    if material_tag or material_name:
-        tag = material_tag or "mat1"
-        try:
-            comp.material().create(tag)
-        except Exception:
-            pass
-        mat = comp.material(tag)
-        if material_name:
-            mat.label(material_name)
-        mat.selection().all()
-    return mph_model
+    if debug:
+        print(
+            f"[export_geometry_to_comsol] Finished creating {total_cells} cells in "
+            f"{time.perf_counter() - start_time:.1f}s"
+        )
+
+    mph_model.save(save_path, format="Comsol")
+    mph_client.clear()
+
+    print(f"\nCOMSOL model saved as {save_path}!")
+
+    return
 
 
 def reverse_lookup_optimize_rcwa(
