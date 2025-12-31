@@ -343,8 +343,7 @@ def export_geometry_to_comsol(
         )
 
     mph_model.save(save_path, format="Comsol")
-    mph_client.clear()
-
+    
     print(f"\nCOMSOL model saved as {save_path}!")
 
     return
