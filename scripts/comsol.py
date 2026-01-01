@@ -4,7 +4,7 @@ from dflat.metasurface import export_geometry_to_comsol
 
 path = "./data/"
 
-model_name = "Nanocylinders_Si3N4_U350H600"
+model_name = "Nanocylinders_TiO2_U300H600"
 
 p = np.load(path+"designed_metasurface.npy")
 
