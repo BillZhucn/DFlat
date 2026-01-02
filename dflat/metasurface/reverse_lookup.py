@@ -183,13 +183,6 @@ def _infer_pitch_height_from_name(model_name):
         height_m = float(height_match.group(1)) * 1e-9
     return pitch_m, height_m
 
-
-def _infer_material_from_name(model_name):
-    """Infer a simple material label (e.g., TiO2, Si3N4) from the model name."""
-    match = re.search(r"(TiO2|Si3N4|SiO2|Si)", model_name)
-    return match.group(1) if match else None
-
-
 def export_geometry_to_comsol(
     params_m,
     model_name,
@@ -198,11 +191,9 @@ def export_geometry_to_comsol(
     pitch_m=None,
     height_m=None,
     component="comp1",
-    geometry="geom1",
+    geometry="Geometry 1",
     model_label="dflat_metasurface",
     z_offset=0.0,
-    material_tag=None,
-    material_label=None,
     show_progress=True,
     debug=False,
     log_every=10000,
@@ -254,7 +245,6 @@ def export_geometry_to_comsol(
 
     h_cells, w_cells, d_params = arr.shape
     inferred_pitch, inferred_height = _infer_pitch_height_from_name(model_name)
-    inferred_material = _infer_material_from_name(model_name)
     pitch_m = pitch_m or inferred_pitch
     height_m = height_m or inferred_height
     if pitch_m is None:
@@ -336,11 +326,9 @@ def export_geometry_to_comsol(
     if pbar:
         pbar.close()
 
-    if debug:
-        print(
-            f"[export_geometry_to_comsol] Finished creating {total_cells} cells in "
-            f"{time.perf_counter() - start_time:.1f}s"
-        )
+    print(
+            f"Finished creating {total_cells} cells in "
+            f"{time.perf_counter() - start_time:.1f}s")
 
     mph_model.save(save_path, format="Comsol")
     
