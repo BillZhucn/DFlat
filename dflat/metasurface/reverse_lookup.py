@@ -191,7 +191,7 @@ def export_geometry_to_comsol(
     pitch_m=None,
     height_m=None,
     component="comp1",
-    geometry="Geometry 1",
+    geometry="geom1",
     model_label="dflat_metasurface",
     z_offset=0.0,
     show_progress=True,

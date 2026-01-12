@@ -12,15 +12,17 @@ print(p.shape, p.min(), p.max())
 
 print("\nStarting COMSOL export...\n")
 
-server = mph.Server(port=11451, arguments=["-Xmx56g"], version="6.3")
+mph.option('classkit', False)
+
 mph_client = None
 
-print("Starting COMSOL server version "+server.version+"...\n")
+version = '6.3'
+port = 11451
 
-mph_client = mph.Client(host="localhost", port=server.port, version=server.version)
+mph_client = mph.Client(host="localhost", port=port, version=version)
 mph_model = mph_client.load(path+"metasurface-6.3.mph")
 
-print("COMSOL server started.\n")
+print("COMSOL server connected.\n")
 
 export_geometry_to_comsol(
     p,
